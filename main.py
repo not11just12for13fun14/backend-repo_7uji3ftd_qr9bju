@@ -54,6 +54,9 @@ class BookingPayload(BaseModel):
     slot_id: str
     notes: Optional[str] = None
 
+class NotificationReadPayload(BaseModel):
+    ids: Optional[List[str]] = None
+
 
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
@@ -104,6 +107,10 @@ def require_admin(user = Depends(get_current_user)):
 def root():
     return {"message": "Musical Booking API running"}
 
+@app.get("/health")
+def health():
+    return {"ok": True, "time": datetime.now(timezone.utc).isoformat()}
+
 @app.get("/test")
 def test_database():
     response = {
@@ -124,6 +131,7 @@ def test_database():
 # ===================== Auth =====================
 @app.post("/auth/signup", response_model=Token)
 def signup(payload: SignUpPayload):
+    existing_admin = db.user.find_one({"is_admin": True}) if db else None
     if db.user.find_one({"email": payload.email}):
         raise HTTPException(400, "Email already registered")
     user_doc = {
@@ -139,7 +147,7 @@ def signup(payload: SignUpPayload):
         },
         "role": "pending",
         "verified": False,
-        "is_admin": False,
+        "is_admin": False if existing_admin else True,  # First user becomes admin
         "status": "active",
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc)
@@ -234,6 +242,12 @@ def admin_users(admin = Depends(require_admin)):
         u["_id"] = str(u["_id"]) 
     return users
 
+# Optional: admin can promote/demote users
+@app.post("/admin/promote/{user_id}")
+def promote_user(user_id: str, admin = Depends(require_admin)):
+    db.user.update_one({"_id": ObjectId(user_id)}, {"$set": {"is_admin": True, "updated_at": datetime.now(timezone.utc)}})
+    return {"message": "Promoted"}
+
 # ===================== Availability =====================
 @app.post("/availability")
 def add_availability(payload: AvailabilityPayload, current = Depends(get_current_user)):
@@ -256,6 +270,24 @@ def get_availability(user_id: str):
     for s in slots:
         s["_id"] = str(s["_id"]) 
     return slots
+
+@app.get("/availability/mine")
+def get_my_availability(current = Depends(get_current_user)):
+    uid = str(current["_id"]) 
+    slots = list(db.availabilityslot.find({"user_id": uid}))
+    for s in slots:
+        s["_id"] = str(s["_id"]) 
+    return slots
+
+@app.delete("/availability/{slot_id}")
+def delete_availability(slot_id: str, current = Depends(get_current_user)):
+    slot = db.availabilityslot.find_one({"_id": ObjectId(slot_id)})
+    if not slot or slot.get("user_id") != str(current["_id"]):
+        raise HTTPException(404, "Slot not found")
+    if slot.get("is_booked"):
+        raise HTTPException(400, "Cannot delete a booked slot")
+    db.availabilityslot.delete_one({"_id": ObjectId(slot_id)})
+    return {"deleted": True}
 
 # ===================== Bookings =====================
 @app.post("/bookings")
@@ -286,13 +318,55 @@ def my_bookings(current = Depends(get_current_user)):
         b["_id"] = str(b["_id"]) 
     return bookings
 
+@app.post("/bookings/{booking_id}/confirm")
+def confirm_booking(booking_id: str, current = Depends(get_current_user)):
+    booking = db.booking.find_one({"_id": ObjectId(booking_id)})
+    if not booking:
+        raise HTTPException(404, "Booking not found")
+    if booking.get("target_id") != str(current["_id"]):
+        raise HTTPException(403, "Only target can confirm")
+    db.booking.update_one({"_id": ObjectId(booking_id)}, {"$set": {"status": "confirmed", "updated_at": datetime.now(timezone.utc)}})
+    create_document("notification", {"user_id": booking["requester_id"], "title": "Booking Confirmed", "message": "Your booking was confirmed.", "type": "success"})
+    return {"status": "confirmed"}
+
+@app.post("/bookings/{booking_id}/cancel")
+def cancel_booking(booking_id: str, current = Depends(get_current_user)):
+    booking = db.booking.find_one({"_id": ObjectId(booking_id)})
+    if not booking:
+        raise HTTPException(404, "Booking not found")
+    # requester or target can cancel
+    if str(current["_id"]) not in (booking.get("requester_id"), booking.get("target_id")):
+        raise HTTPException(403, "Not allowed")
+    db.booking.update_one({"_id": ObjectId(booking_id)}, {"$set": {"status": "cancelled", "updated_at": datetime.now(timezone.utc)}})
+    # free the slot again if cancelled before event
+    db.availabilityslot.update_one({"_id": ObjectId(booking.get("slot_id"))}, {"$set": {"is_booked": False, "updated_at": datetime.now(timezone.utc)}})
+    other_id = booking["target_id"] if booking["requester_id"] == str(current["_id"]) else booking["requester_id"]
+    create_document("notification", {"user_id": other_id, "title": "Booking Cancelled", "message": "A booking was cancelled.", "type": "warning"})
+    return {"status": "cancelled"}
+
 # ===================== Notifications =====================
 @app.get("/notifications")
 def my_notifications(current = Depends(get_current_user)):
-    docs = list(db.notification.find({"user_id": str(current["_id"])}, sort=[("created_at", -1)]))
+    docs = list(db.notification.find({"user_id": str(current["_id"] )}, sort=[("created_at", -1)]))
     for d in docs:
         d["_id"] = str(d["_id"]) 
     return docs
+
+@app.patch("/notifications/read")
+def mark_notifications_read(payload: NotificationReadPayload, current = Depends(get_current_user)):
+    uid = str(current["_id"])
+    filt = {"user_id": uid}
+    if payload.ids:
+        try_ids = []
+        for i in payload.ids:
+            try:
+                try_ids.append(ObjectId(i))
+            except Exception:
+                pass
+        if try_ids:
+            filt["_id"] = {"$in": try_ids}
+    db.notification.update_many(filt, {"$set": {"is_read": True, "updated_at": datetime.now(timezone.utc)}})
+    return {"updated": True}
 
 
 if __name__ == "__main__":
