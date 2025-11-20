@@ -1,48 +1,65 @@
 """
-Database Schemas
+Database Schemas for Discord-based Musical Events Booking System
 
-Define your MongoDB collection schemas here using Pydantic models.
-These schemas are used for data validation in your application.
-
-Each Pydantic model represents a collection in your database.
-Model name is converted to lowercase for the collection name:
-- User -> "user" collection
-- Product -> "product" collection
-- BlogPost -> "blogs" collection
+Each Pydantic model corresponds to a MongoDB collection (lowercased name).
 """
+from __future__ import annotations
+from pydantic import BaseModel, Field, EmailStr, HttpUrl
+from typing import Optional, List, Literal
+from datetime import datetime
 
-from pydantic import BaseModel, Field
-from typing import Optional
-
-# Example schemas (replace with your own):
+# ============== AUTH & USERS ==================
+class Profile(BaseModel):
+    display_name: Optional[str] = None
+    avatar_url: Optional[HttpUrl] = None
+    bio: Optional[str] = None
+    links: List[HttpUrl] = []
 
 class User(BaseModel):
-    """
-    Users collection schema
-    Collection name: "user" (lowercase of class name)
-    """
-    name: str = Field(..., description="Full name")
-    email: str = Field(..., description="Email address")
-    address: str = Field(..., description="Address")
-    age: Optional[int] = Field(None, ge=0, le=120, description="Age in years")
-    is_active: bool = Field(True, description="Whether user is active")
+    email: EmailStr
+    password_hash: Optional[str] = Field(None, description="Hashed password (bcrypt)")
+    oauth_provider: Optional[str] = None
+    oauth_id: Optional[str] = None
+    profile: Profile = Field(default_factory=Profile)
+    role: Literal["user", "artist", "host", "pending"] = "pending"
+    verified: bool = False
+    is_admin: bool = False
+    status: Literal["active", "suspended"] = "active"
 
-class Product(BaseModel):
-    """
-    Products collection schema
-    Collection name: "product" (lowercase of class name)
-    """
-    title: str = Field(..., description="Product title")
-    description: Optional[str] = Field(None, description="Product description")
-    price: float = Field(..., ge=0, description="Price in dollars")
-    category: str = Field(..., description="Product category")
-    in_stock: bool = Field(True, description="Whether product is in stock")
+class VerificationRequest(BaseModel):
+    user_id: str
+    role: Literal["artist", "host"]
+    demo_video_url: HttpUrl
+    description: Optional[str] = None
+    links: List[HttpUrl] = []
+    status: Literal["pending", "approved", "rejected"] = "pending"
+    reviewed_by: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+    feedback: Optional[str] = None
 
-# Add your own schemas here:
-# --------------------------------------------------
+# ============== AVAILABILITY & BOOKINGS ==================
+class AvailabilitySlot(BaseModel):
+    user_id: str
+    start_iso: str  # ISO datetime string UTC
+    end_iso: str    # ISO datetime string UTC
+    is_booked: bool = False
 
-# Note: The Flames database viewer will automatically:
-# 1. Read these schemas from GET /schema endpoint
-# 2. Use them for document validation when creating/editing
-# 3. Handle all database operations (CRUD) directly
-# 4. You don't need to create any database endpoints!
+class Booking(BaseModel):
+    requester_id: str
+    target_id: str  # artist or host id
+    slot_id: str
+    status: Literal["pending", "confirmed", "cancelled"] = "pending"
+    notes: Optional[str] = None
+
+# ============== NOTIFICATIONS ==================
+class Notification(BaseModel):
+    user_id: str
+    title: str
+    message: str
+    type: Literal["info", "success", "warning", "error"] = "info"
+    is_read: bool = False
+
+# ============== SETTINGS ==================
+class SiteSetting(BaseModel):
+    key: str
+    value: dict
